@@ -1,0 +1,942 @@
+(function () {
+  if (window.__arxReviewLensLoaded) {
+    return;
+  }
+  window.__arxReviewLensLoaded = true;
+
+  const ROOT_ID = "arx-root";
+  const LAUNCHER_ID = "arx-launcher";
+  const REFRESH_DEBOUNCE_MS = 900;
+
+  const DEFAULT_SETTINGS = {
+    openByDefault: true,
+    compactMode: true,
+    minConfidence: 55,
+    showPros: true,
+    showCons: true,
+    showSeller: true,
+    showTrust: true,
+    showThemes: true,
+    showRisks: true,
+    useBackendCrawl: true,
+    backendBaseUrl: "http://localhost:8787",
+    backendPages: 3,
+    useAiAnalysis: true,
+    aiProvider: "backend",
+    openAiApiKey: "",
+    openAiModel: "nlptown/bert-base-multilingual-uncased-sentiment",
+    localeMode: "auto"
+  };
+
+  const LANG_PACKS = {
+    en: {
+      positive: ["great", "excellent", "amazing", "durable", "comfortable", "reliable", "easy", "value", "recommended", "solid", "premium", "fast"],
+      negative: ["bad", "poor", "broken", "fake", "slow", "cheap", "defective", "refund", "return", "issue", "problem", "worst"],
+      stop: ["the", "and", "for", "with", "this", "that", "from", "have", "been", "they", "you", "your", "not", "very", "just", "product", "item"]
+    },
+    es: {
+      positive: ["excelente", "bueno", "increible", "comodo", "rapido", "calidad", "recomendado", "perfecto", "util", "fiable"],
+      negative: ["malo", "defectuoso", "lento", "falso", "caro", "decepcion", "problema", "roto", "devolver", "pesimo"],
+      stop: ["para", "con", "este", "esta", "muy", "pero", "como", "que", "del", "por", "producto", "articulo"]
+    },
+    de: {
+      positive: ["gut", "ausgezeichnet", "hochwertig", "schnell", "zuverlassig", "empfehlenswert", "stabil", "bequem", "praktisch", "super"],
+      negative: ["schlecht", "kaputt", "falsch", "langsam", "problem", "defekt", "ruckgabe", "enttauschend", "teuer", "mangelhaft"],
+      stop: ["und", "der", "die", "das", "mit", "fur", "nicht", "sehr", "aber", "produkt", "artikel"]
+    },
+    fr: {
+      positive: ["excellent", "bon", "super", "qualite", "rapide", "fiable", "recommande", "parfait", "solide", "pratique"],
+      negative: ["mauvais", "lent", "faux", "defaut", "probleme", "retour", "deception", "casse", "cher", "nul"],
+      stop: ["avec", "pour", "dans", "mais", "tres", "pas", "produit", "article", "cette", "ceci"]
+    },
+    it: {
+      positive: ["ottimo", "buono", "eccellente", "qualita", "veloce", "consigliato", "affidabile", "perfetto", "comodo", "utile"],
+      negative: ["scarso", "rotto", "falso", "lento", "problema", "difetto", "reso", "deludente", "costoso", "pessimo"],
+      stop: ["con", "per", "questo", "questa", "molto", "non", "ma", "prodotto", "articolo"]
+    },
+    ja: {
+      positive: ["良い", "最高", "便利", "高品質", "快適", "おすすめ", "満足", "使いやすい", "丈夫", "迅速"],
+      negative: ["悪い", "遅い", "偽物", "壊れた", "問題", "不良", "返品", "高すぎる", "最悪", "不満"],
+      stop: ["これ", "それ", "ため", "とても", "でも", "商品", "アイテム"]
+    }
+  };
+
+  let state = {
+    open: true,
+    expanded: true,
+    url: location.href,
+    settings: { ...DEFAULT_SETTINGS },
+    lastData: null,
+    requestId: 0
+  };
+  let renderTimer = null;
+  let observer = null;
+  let observedNode = null;
+
+  function isProductPage() {
+    if (/\b(?:dp|gp\/product|gp\/aw\/d|product)\/[A-Z0-9]{10}\b/i.test(location.pathname)) {
+      return true;
+    }
+    return Boolean(document.querySelector("#dp, #productTitle, #ppd"));
+  }
+
+  function detectAsin() {
+    const urlMatch = location.pathname.match(/\/(?:dp|gp\/product|gp\/aw\/d|product)\/([A-Z0-9]{10})/i);
+    if (urlMatch) {
+      return urlMatch[1].toUpperCase();
+    }
+    const input = document.querySelector("#ASIN, input[name='ASIN'], input[name='asin']");
+    return (input?.value || "N/A").toUpperCase();
+  }
+
+  function textFrom(node) {
+    return (node?.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function findText(selectors) {
+    for (const selector of selectors) {
+      const value = textFrom(document.querySelector(selector));
+      if (value) {
+        return value;
+      }
+    }
+    return "";
+  }
+
+  function findAttr(selectors, attr) {
+    for (const selector of selectors) {
+      const value = (document.querySelector(selector)?.getAttribute(attr) || "").trim();
+      if (value) {
+        return value;
+      }
+    }
+    return "";
+  }
+
+  function parseRating(value) {
+    const match = (value || "").replace(",", ".").match(/(\d+(?:\.\d+)?)/);
+    if (!match) {
+      return null;
+    }
+    const num = Number.parseFloat(match[1]);
+    return Number.isFinite(num) ? num : null;
+  }
+
+  function parseCount(value) {
+    const normalized = (value || "").replace(/,/g, "").toLowerCase();
+    const match = normalized.match(/(\d+(?:\.\d+)?)\s*([km]?)/);
+    if (!match) {
+      return 0;
+    }
+    let count = Number.parseFloat(match[1]);
+    if (!Number.isFinite(count)) {
+      return 0;
+    }
+    if (match[2] === "k") {
+      count *= 1000;
+    } else if (match[2] === "m") {
+      count *= 1000000;
+    }
+    return Math.round(count);
+  }
+
+  function parseHelpfulVotes(value) {
+    const text = (value || "").toLowerCase().replace(/,/g, "");
+    if (text.includes("one person")) {
+      return 1;
+    }
+    const match = text.match(/(\d+)/);
+    return match ? Number.parseInt(match[1], 10) : 0;
+  }
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function dedupe(items, maxItems) {
+    const out = [];
+    const seen = new Set();
+    for (const item of items) {
+      const clean = (item || "").trim();
+      if (!clean) {
+        continue;
+      }
+      const key = clean.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      out.push(clean);
+      if (out.length >= maxItems) {
+        break;
+      }
+    }
+    return out;
+  }
+
+  function formatNumber(value) {
+    if (!Number.isFinite(value)) {
+      return "N/A";
+    }
+    return new Intl.NumberFormat().format(value);
+  }
+
+  function percent(value) {
+    if (!Number.isFinite(value)) {
+      return "0%";
+    }
+    return `${Math.round(value * 100)}%`;
+  }
+
+  function escapeHtml(value) {
+    if (value === null || value === undefined) {
+      return "";
+    }
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function detectLocale() {
+    if (state.settings.localeMode && state.settings.localeMode !== "auto") {
+      return state.settings.localeMode;
+    }
+
+    const htmlLang = (document.documentElement?.lang || "").toLowerCase();
+    if (htmlLang.startsWith("es")) return "es";
+    if (htmlLang.startsWith("de")) return "de";
+    if (htmlLang.startsWith("fr")) return "fr";
+    if (htmlLang.startsWith("it")) return "it";
+    if (htmlLang.startsWith("ja")) return "ja";
+
+    const host = location.hostname.toLowerCase();
+    if (host.endsWith(".co.jp")) return "ja";
+    if (host.endsWith(".de")) return "de";
+    if (host.endsWith(".fr")) return "fr";
+    if (host.endsWith(".it")) return "it";
+    if (host.endsWith(".es")) return "es";
+    return "en";
+  }
+
+  function getLanguagePack() {
+    const locale = detectLocale();
+    const base = LANG_PACKS[locale] || LANG_PACKS.en;
+    const en = LANG_PACKS.en;
+    return {
+      locale,
+      positive: new Set([...en.positive, ...base.positive].map((word) => word.toLowerCase())),
+      negative: new Set([...en.negative, ...base.negative].map((word) => word.toLowerCase())),
+      stop: new Set([...en.stop, ...base.stop].map((word) => word.toLowerCase()))
+    };
+  }
+
+  function tokenize(text, stopWords) {
+    const terms = [];
+    const matches = (text || "").toLowerCase().match(/[\p{L}\p{N}'-]{2,}/gu) || [];
+    for (const raw of matches) {
+      const word = raw.replace(/^'+|'+$/g, "");
+      if (word.length < 2 || stopWords.has(word)) {
+        continue;
+      }
+      terms.push(word);
+    }
+    return terms;
+  }
+
+  function parseReviewBlocks() {
+    const blocks = Array.from(document.querySelectorAll("[data-hook='review']")).slice(0, 40);
+    return blocks.map((block) => {
+      const starText =
+        textFrom(block.querySelector("[data-hook='review-star-rating'] .a-icon-alt")) ||
+        textFrom(block.querySelector("[data-hook='cmps-review-star-rating'] .a-icon-alt")) ||
+        textFrom(block.querySelector(".review-rating .a-icon-alt"));
+      const title = textFrom(block.querySelector("[data-hook='review-title']"));
+      const body =
+        textFrom(block.querySelector("[data-hook='review-body'] span")) ||
+        textFrom(block.querySelector("[data-hook='review-collapsed']")) ||
+        textFrom(block.querySelector(".review-text-content span"));
+      return {
+        title,
+        body,
+        stars: parseRating(starText),
+        helpfulVotes: parseHelpfulVotes(textFrom(block.querySelector("[data-hook='helpful-vote-statement']"))),
+        verified: Boolean(block.querySelector("[data-hook='avp-badge'], [data-hook='avp-badge-linkless']"))
+      };
+    });
+  }
+
+  function buildProsFromBullets() {
+    return dedupe(
+      Array.from(
+        document.querySelectorAll("#feature-bullets .a-list-item, #featurebullets_feature_div .a-list-item")
+      )
+        .map((node) => textFrom(node))
+        .filter((line) => line.length >= 16 && !/^see more/i.test(line)),
+      4
+    );
+  }
+
+  function collectBadges() {
+    const selectors = [
+      "#acBadge_feature_div",
+      "#dealBadge_feature_div",
+      "#zeitgeistBadge_feature_div",
+      "#social-proofing-faceout-title-tk_bought",
+      "#social-proofing-faceout-title-tk_trending",
+      "#applicablePromotionList_feature_div"
+    ];
+    return dedupe(
+      selectors
+        .map((selector) => textFrom(document.querySelector(selector)))
+        .filter((text) => text && text.length < 100),
+      6
+    );
+  }
+
+  function analyzeReviews(reviews, langPack) {
+    let verifiedCount = 0;
+    let helpfulVotes = 0;
+    let starSum = 0;
+    let starCount = 0;
+    const starValues = [];
+    const pros = [];
+    const cons = [];
+    const posTerms = new Map();
+    const negTerms = new Map();
+
+    for (const review of reviews) {
+      const combined = `${review.title || ""}. ${review.body || ""}`.trim();
+      if (!combined) {
+        continue;
+      }
+      const terms = tokenize(combined, langPack.stop);
+      const star = Number.isFinite(review.stars) ? review.stars : null;
+      if (review.verified) {
+        verifiedCount += 1;
+      }
+      helpfulVotes += review.helpfulVotes || 0;
+      if (star !== null) {
+        starSum += star;
+        starCount += 1;
+        starValues.push(star);
+      }
+
+      const sentences = combined
+        .split(/[.!?]/)
+        .map((sentence) => sentence.trim())
+        .filter((sentence) => sentence.length >= 20)
+        .slice(0, 2);
+
+      for (const sentence of sentences) {
+        const words = tokenize(sentence, langPack.stop);
+        const posHits = words.filter((word) => langPack.positive.has(word)).length;
+        const negHits = words.filter((word) => langPack.negative.has(word)).length;
+
+        if (star !== null && star >= 4) {
+          pros.push(sentence);
+          break;
+        }
+        if (star !== null && star <= 2) {
+          cons.push(sentence);
+          break;
+        }
+        if (posHits >= negHits + 2) {
+          pros.push(sentence);
+          break;
+        }
+        if (negHits >= posHits + 2) {
+          cons.push(sentence);
+          break;
+        }
+      }
+
+      if (star !== null && star >= 4) {
+        for (const term of terms) {
+          if (term.length >= 5 || langPack.positive.has(term)) {
+            posTerms.set(term, (posTerms.get(term) || 0) + 1);
+          }
+        }
+      } else if (star !== null && star <= 2) {
+        for (const term of terms) {
+          if (term.length >= 5 || langPack.negative.has(term)) {
+            negTerms.set(term, (negTerms.get(term) || 0) + 1);
+          }
+        }
+      }
+    }
+
+    const avgStars = starCount > 0 ? starSum / starCount : null;
+    const verifiedRatio = reviews.length > 0 ? verifiedCount / reviews.length : 0;
+    const variance =
+      starValues.length > 1
+        ? starValues.reduce((acc, value) => acc + (value - (avgStars || 0)) ** 2, 0) / starValues.length
+        : 0;
+
+    return {
+      avgStars,
+      verifiedRatio,
+      helpfulVotes,
+      variance,
+      pros: dedupe(pros, 5),
+      cons: dedupe(cons, 5),
+      topPositiveTerms: Array.from(posTerms.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([term]) => term),
+      topNegativeTerms: Array.from(negTerms.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([term]) => term)
+    };
+  }
+
+  function buildRiskFlags(data) {
+    const flags = [];
+    if (data.sampleReviews < 8) {
+      flags.push("Visible review sample is small.");
+    }
+    if (data.ratingCount > 0 && data.ratingCount < 60) {
+      flags.push("Low rating count for a strong confidence purchase.");
+    }
+    if (data.rating !== null && data.rating >= 4.9 && data.verifiedRatio < 0.35 && data.sampleReviews >= 10) {
+      flags.push("Very high rating with limited visible verified-purchase evidence.");
+    }
+    if (data.reviewVariance > 1.7) {
+      flags.push("High rating variance indicates polarized sentiment.");
+    }
+    if (!data.seller || /unknown/i.test(data.seller)) {
+      flags.push("Seller identity is unclear.");
+    }
+    return flags;
+  }
+
+  function computeScores(data) {
+    let authenticity = 48;
+    authenticity += (data.verifiedRatio - 0.5) * 45;
+    if (data.ratingCount >= 2000) authenticity += 12;
+    else if (data.ratingCount >= 400) authenticity += 8;
+    else if (data.ratingCount < 50) authenticity -= 8;
+    if (data.soldByAmazon || data.fulfilledByAmazon) authenticity += 9;
+    if (data.rating !== null && data.rating > 4.9) authenticity -= 5;
+    if (data.reviewVariance > 1.7) authenticity -= 4;
+    if (data.sampleReviews < 8) authenticity -= 6;
+
+    let confidence = 24;
+    confidence += Math.min(30, data.sampleReviews) * 2;
+    if (data.ratingCount > 0) confidence += 10;
+    if (data.rating !== null) confidence += 8;
+    if (data.seller && !/unknown/i.test(data.seller)) confidence += 8;
+    if (data.sampleReviews === 0) confidence = 15;
+
+    return {
+      authenticityScore: clamp(Math.round(authenticity), 0, 100),
+      confidenceScore: clamp(Math.round(confidence), 0, 100)
+    };
+  }
+
+  function analyzeLocal() {
+    const langPack = getLanguagePack();
+    const reviews = parseReviewBlocks();
+    const reviewAnalysis = analyzeReviews(reviews, langPack);
+    const sellerInfo = findText(["#merchant-info", "#sellerProfileTriggerId", "#tabular-buybox-truncate-1"]);
+    const sellerName =
+      findText(["#sellerProfileTriggerId", "#aod-offer-soldBy .a-size-small", "#merchant-info"]) || "Unknown";
+    const soldByAmazon = /sold by amazon/i.test(sellerInfo) || /amazon\./i.test(sellerName);
+    const fulfilledByAmazon = /fulfilled by amazon/i.test(sellerInfo) || /ships from amazon/i.test(sellerInfo);
+    const ratingText =
+      findAttr(["#acrPopover", "span[data-hook='rating-out-of-text']", "#averageCustomerReviews #acrPopover"], "title") ||
+      findText(["#averageCustomerReviews .a-icon-alt", "#acrPopover span.a-icon-alt"]);
+
+    const base = {
+      asin: detectAsin(),
+      locale: langPack.locale,
+      url: location.href,
+      title: findText(["#productTitle", "#title", "h1 span#title"]) || "Product",
+      brand: findText(["#bylineInfo", "#brand", "#brandSnapshot_feature_div"]) || "Not specified",
+      price:
+        findText([
+          "#corePrice_feature_div .a-price .a-offscreen",
+          "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
+          "#tp_price_block_total_price_ww .a-offscreen",
+          "#priceblock_ourprice",
+          "#priceblock_dealprice",
+          ".a-price .a-offscreen"
+        ]) || "N/A",
+      rating: parseRating(ratingText),
+      ratingCount: parseCount(
+        findText(["#acrCustomerReviewText", "span[data-hook='total-review-count']", "#reviews-medley-footer .a-link-normal"])
+      ),
+      availability: findText(["#availability span", "#outOfStock", "#availability"]) || "N/A",
+      seller: sellerName,
+      soldByAmazon,
+      fulfilledByAmazon,
+      badges: collectBadges(),
+      sampleReviews: reviews.length,
+      verifiedRatio: reviewAnalysis.verifiedRatio,
+      helpfulVotes: reviewAnalysis.helpfulVotes,
+      avgReviewStars: reviewAnalysis.avgStars,
+      reviewVariance: reviewAnalysis.variance,
+      pros: dedupe([...buildProsFromBullets(), ...reviewAnalysis.pros], 6),
+      cons: dedupe(reviewAnalysis.cons, 6),
+      topPositiveTerms: reviewAnalysis.topPositiveTerms,
+      topNegativeTerms: reviewAnalysis.topNegativeTerms,
+      riskFlags: []
+    };
+    const scores = computeScores(base);
+    base.authenticityScore = scores.authenticityScore;
+    base.confidenceScore = scores.confidenceScore;
+    base.riskFlags = buildRiskFlags(base);
+    return base;
+  }
+
+  async function requestMessage(type, payload) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type, payload }, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+        resolve(response || { ok: false, error: "Empty response." });
+      });
+    });
+  }
+
+  function mergeBackendData(local, backendResponse) {
+    const remote = backendResponse?.data || backendResponse;
+    if (!remote || typeof remote !== "object") {
+      return local;
+    }
+    const merged = { ...local };
+    const overrideKeys = [
+      "sampleReviews",
+      "verifiedRatio",
+      "helpfulVotes",
+      "avgReviewStars",
+      "reviewVariance",
+      "rating",
+      "ratingCount"
+    ];
+    for (const key of overrideKeys) {
+      if (remote[key] !== undefined && remote[key] !== null) {
+        merged[key] = remote[key];
+      }
+    }
+    merged.pros = dedupe([...(remote.pros || []), ...merged.pros], 6);
+    merged.cons = dedupe([...(remote.cons || []), ...merged.cons], 6);
+    merged.topPositiveTerms = dedupe([...(remote.topPositiveTerms || []), ...merged.topPositiveTerms], 6);
+    merged.topNegativeTerms = dedupe([...(remote.topNegativeTerms || []), ...merged.topNegativeTerms], 6);
+    merged.badges = dedupe([...(remote.badges || []), ...merged.badges], 6);
+    merged.riskFlags = dedupe([...(remote.riskFlags || []), ...merged.riskFlags], 8);
+    if (Number.isFinite(remote.authenticityScore)) {
+      merged.authenticityScore = clamp(Math.round(remote.authenticityScore), 0, 100);
+    }
+    if (Number.isFinite(remote.confidenceScore)) {
+      merged.confidenceScore = clamp(Math.round(remote.confidenceScore), 0, 100);
+    }
+    merged.remoteSamplePages = remote.pagesCrawled || null;
+    merged.remoteSource = remote.source || "backend";
+    return merged;
+  }
+
+  function mergeAiData(local, aiResponse) {
+    const ai = aiResponse?.data || aiResponse;
+    if (!ai || typeof ai !== "object") {
+      return local;
+    }
+    const merged = { ...local };
+    merged.aiSummary = typeof ai.summary === "string" ? ai.summary.trim() : "";
+    merged.aiRecommendation = typeof ai.recommendation === "string" ? ai.recommendation.trim() : "";
+    merged.pros = dedupe([...(ai.pros || []), ...merged.pros], 6);
+    merged.cons = dedupe([...(ai.cons || []), ...merged.cons], 6);
+    merged.riskFlags = dedupe([...(ai.riskFlags || []), ...merged.riskFlags], 8);
+    merged.sellerNotes = dedupe(ai.sellerNotes || [], 5);
+    if (Number.isFinite(ai.authenticityScore)) {
+      merged.authenticityScore = clamp(Math.round(ai.authenticityScore), 0, 100);
+    }
+    if (Number.isFinite(ai.confidenceScore)) {
+      merged.confidenceScore = clamp(Math.round(ai.confidenceScore), 0, 100);
+    }
+    merged.aiEnabled = true;
+    return merged;
+  }
+
+  function scoreToneClass(score) {
+    if (score >= 75) return "arx-good";
+    if (score >= 50) return "arx-mid";
+    return "arx-risk";
+  }
+
+  function renderList(items, emptyMessage) {
+    const list = items && items.length > 0 ? items : [emptyMessage];
+    return list.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  }
+
+  function renderTags(items, emptyMessage) {
+    if (!items || items.length === 0) {
+      return `<span class="arx-tag arx-tag-muted">${escapeHtml(emptyMessage)}</span>`;
+    }
+    return items.map((item) => `<span class="arx-tag">${escapeHtml(item)}</span>`).join("");
+  }
+
+  function buildSummaryLine(data) {
+    const bits = [
+      data.rating !== null ? `${data.rating.toFixed(1)}/5` : "No rating",
+      `${formatNumber(data.ratingCount)} ratings`,
+      `${percent(data.verifiedRatio)} verified`,
+      `ASIN ${data.asin}`
+    ];
+    return bits.join(" | ");
+  }
+
+  function renderPanel(data) {
+    const root = ensureRoot();
+    if (!root) {
+      return;
+    }
+    const lowConfidence = data.confidenceScore < state.settings.minConfidence;
+    const expanded = state.expanded;
+
+    root.innerHTML = `
+      <div class="arx-card-shell ${expanded ? "arx-expanded" : "arx-collapsed"}">
+        <header class="arx-head">
+          <div class="arx-title-row">
+            <span class="arx-pill">Review Lens</span>
+            <button class="arx-icon-btn" type="button" data-arx-action="collapse">Hide</button>
+          </div>
+          <h2>${escapeHtml(data.title)}</h2>
+          <p>${escapeHtml(buildSummaryLine(data))}</p>
+        </header>
+
+        <section class="arx-score-row">
+          <article>
+            <span>Authenticity</span>
+            <strong class="${scoreToneClass(data.authenticityScore)}">${data.authenticityScore}</strong>
+          </article>
+          <article>
+            <span>Confidence</span>
+            <strong class="${lowConfidence ? "arx-risk" : scoreToneClass(data.confidenceScore)}">${data.confidenceScore}</strong>
+          </article>
+          <article>
+            <span>Seller</span>
+            <strong>${escapeHtml(data.seller)}</strong>
+          </article>
+        </section>
+
+        ${
+          lowConfidence
+            ? `<div class="arx-alert">Confidence is below your threshold (${state.settings.minConfidence}).</div>`
+            : ""
+        }
+
+        ${
+          data.aiSummary
+            ? `<section class="arx-ai"><h3>AI Summary</h3><p>${escapeHtml(data.aiSummary)}</p></section>`
+            : ""
+        }
+
+        <div class="arx-actions">
+          <button class="arx-btn arx-btn-light" type="button" data-arx-action="toggle-details">${expanded ? "Compact" : "Expand"}</button>
+          <button class="arx-btn" type="button" data-arx-action="refresh">Refresh</button>
+        </div>
+
+        <section class="arx-details ${expanded ? "" : "arx-hidden"}">
+          ${
+            state.settings.showPros
+              ? `<article class="arx-block"><h3>Pros</h3><ul>${renderList(data.pros, "No strong pros found from visible data.")}</ul></article>`
+              : ""
+          }
+          ${
+            state.settings.showCons
+              ? `<article class="arx-block"><h3>Cons</h3><ul>${renderList(data.cons, "No clear weak points found from visible data.")}</ul></article>`
+              : ""
+          }
+          ${
+            state.settings.showSeller
+              ? `<article class="arx-block"><h3>Seller & Delivery</h3><ul>
+                  <li>Seller: ${escapeHtml(data.seller)}</li>
+                  <li>Sold by Amazon: ${data.soldByAmazon ? "Yes" : "No"}</li>
+                  <li>Fulfilled by Amazon: ${data.fulfilledByAmazon ? "Yes" : "No"}</li>
+                  <li>Availability: ${escapeHtml(data.availability)}</li>
+                  <li>Price: ${escapeHtml(data.price)}</li>
+                </ul></article>`
+              : ""
+          }
+          ${
+            state.settings.showTrust
+              ? `<article class="arx-block"><h3>Trust Signals</h3><ul>
+                  <li>Visible sample reviews: ${formatNumber(data.sampleReviews)}</li>
+                  <li>Helpful votes in sample: ${formatNumber(data.helpfulVotes)}</li>
+                  <li>Verified purchase ratio: ${percent(data.verifiedRatio)}</li>
+                  ${
+                    data.remoteSamplePages
+                      ? `<li>Backend review pages crawled: ${escapeHtml(String(data.remoteSamplePages))}</li>`
+                      : ""
+                  }
+                  ${data.aiRecommendation ? `<li>AI recommendation: ${escapeHtml(data.aiRecommendation)}</li>` : ""}
+                </ul></article>`
+              : ""
+          }
+          ${
+            state.settings.showRisks
+              ? `<article class="arx-block"><h3>Risk Flags</h3><ul>${renderList(data.riskFlags, "No high-risk pattern detected.")}</ul></article>`
+              : ""
+          }
+          ${
+            state.settings.showThemes
+              ? `<article class="arx-block"><h3>Review Themes</h3>
+                  <div class="arx-label">Positive</div>
+                  <div class="arx-tags">${renderTags(data.topPositiveTerms, "Insufficient text")}</div>
+                  <div class="arx-label">Negative</div>
+                  <div class="arx-tags">${renderTags(data.topNegativeTerms, "Insufficient text")}</div>
+                  <div class="arx-label">Badges</div>
+                  <div class="arx-tags">${renderTags(data.badges, "No major badge found")}</div>
+                </article>`
+              : ""
+          }
+        </section>
+      </div>
+    `;
+
+    const rootNode = document.getElementById(ROOT_ID);
+    rootNode?.querySelectorAll("[data-arx-action]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const action = button.getAttribute("data-arx-action");
+        if (action === "collapse") {
+          setOpenState(false);
+          return;
+        }
+        if (action === "toggle-details") {
+          state.expanded = !state.expanded;
+          renderPanel(data);
+          return;
+        }
+        if (action === "refresh") {
+          renderNow();
+        }
+      });
+    });
+  }
+
+  function ensureRoot() {
+    if (!isProductPage()) {
+      removeUI();
+      return null;
+    }
+    let root = document.getElementById(ROOT_ID);
+    if (root) {
+      return root;
+    }
+
+    root = document.createElement("section");
+    root.id = ROOT_ID;
+    root.className = "arx-host";
+    const anchor = document.querySelector("#dp, #ppd, #centerCol") || document.body.firstElementChild;
+    if (anchor?.parentNode) {
+      anchor.parentNode.insertBefore(root, anchor);
+    } else {
+      document.body.prepend(root);
+    }
+    return root;
+  }
+
+  function ensureLauncher() {
+    let launcher = document.getElementById(LAUNCHER_ID);
+    if (launcher) {
+      return launcher;
+    }
+    launcher = document.createElement("button");
+    launcher.id = LAUNCHER_ID;
+    launcher.className = "arx-launcher";
+    launcher.textContent = "Review Lens";
+    launcher.type = "button";
+    launcher.addEventListener("click", () => {
+      setOpenState(true);
+      renderNow();
+    });
+    document.body.appendChild(launcher);
+    return launcher;
+  }
+
+  function setOpenState(open) {
+    state.open = open;
+    const root = document.getElementById(ROOT_ID);
+    const launcher = ensureLauncher();
+    if (root) {
+      root.style.display = open ? "flex" : "none";
+    }
+    launcher.style.display = open ? "none" : "inline-flex";
+  }
+
+  function removeUI() {
+    document.getElementById(ROOT_ID)?.remove();
+    document.getElementById(LAUNCHER_ID)?.remove();
+  }
+
+  async function renderNow() {
+    if (!isProductPage()) {
+      removeUI();
+      return;
+    }
+    const requestId = ++state.requestId;
+    const settings = state.settings;
+    let data = analyzeLocal();
+    let backendStatus = "";
+    let aiStatus = "";
+
+    if (settings.useBackendCrawl) {
+      const backendResult = await requestMessage("arx_backend_crawl", {
+        asin: data.asin,
+        url: location.href,
+        pages: settings.backendPages,
+        baseUrl: settings.backendBaseUrl
+      });
+      if (requestId !== state.requestId) {
+        return;
+      }
+      if (backendResult?.ok) {
+        data = mergeBackendData(data, backendResult.data);
+        backendStatus = "backend";
+      } else if (backendResult?.error) {
+        data.riskFlags = dedupe([`Backend crawl failed: ${backendResult.error}`, ...data.riskFlags], 8);
+      }
+    }
+
+    if (settings.useAiAnalysis) {
+      const aiResult = await requestMessage("arx_ai_analyze", {
+        provider: settings.aiProvider,
+        apiKey: settings.openAiApiKey,
+        model: settings.openAiModel,
+        baseUrl: settings.backendBaseUrl,
+        locale: data.locale,
+        input: {
+          title: data.title,
+          asin: data.asin,
+          price: data.price,
+          rating: data.rating,
+          ratingCount: data.ratingCount,
+          seller: data.seller,
+          soldByAmazon: data.soldByAmazon,
+          fulfilledByAmazon: data.fulfilledByAmazon,
+          verifiedRatio: data.verifiedRatio,
+          sampleReviews: data.sampleReviews,
+          helpfulVotes: data.helpfulVotes,
+          badges: data.badges,
+          pros: data.pros,
+          cons: data.cons,
+          positiveThemes: data.topPositiveTerms,
+          negativeThemes: data.topNegativeTerms,
+          riskFlags: data.riskFlags
+        }
+      });
+      if (requestId !== state.requestId) {
+        return;
+      }
+      if (aiResult?.ok) {
+        data = mergeAiData(data, aiResult.data);
+        aiStatus = settings.aiProvider;
+      } else if (aiResult?.error) {
+        data.riskFlags = dedupe([`AI analysis failed: ${aiResult.error}`, ...data.riskFlags], 8);
+      }
+    }
+
+    if (backendStatus || aiStatus) {
+      const sources = [backendStatus, aiStatus].filter(Boolean).join(" + ");
+      data.badges = dedupe([`Enhanced by ${sources}`, ...data.badges], 6);
+    }
+
+    state.lastData = data;
+    ensureLauncher();
+    renderPanel(data);
+    setOpenState(state.open);
+    attachObservers();
+  }
+
+  function queueRender() {
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(() => {
+      renderNow();
+    }, REFRESH_DEBOUNCE_MS);
+  }
+
+  function attachObservers() {
+    const node =
+      document.querySelector("#cm-cr-dp-review-list") ||
+      document.querySelector("#reviewsMedley") ||
+      document.querySelector("#dp");
+    if (!node) {
+      return;
+    }
+    if (observer && observedNode === node) {
+      return;
+    }
+    observer?.disconnect();
+    observedNode = node;
+    observer = new MutationObserver(() => {
+      queueRender();
+    });
+    observer.observe(node, { childList: true, subtree: true });
+  }
+
+  async function loadSettings() {
+    const response = await requestMessage("arx_get_settings", {});
+    const settings = response?.ok ? { ...DEFAULT_SETTINGS, ...(response.settings || {}) } : { ...DEFAULT_SETTINGS };
+    state.settings = settings;
+    state.open = Boolean(settings.openByDefault);
+    state.expanded = !settings.compactMode;
+  }
+
+  function watchUrlChanges() {
+    setInterval(() => {
+      if (state.url === location.href) {
+        return;
+      }
+      state.url = location.href;
+      queueRender();
+    }, 900);
+  }
+
+  function setupListeners() {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "sync") {
+        return;
+      }
+      let changed = false;
+      for (const [key, entry] of Object.entries(changes)) {
+        if (!(key in DEFAULT_SETTINGS)) {
+          continue;
+        }
+        state.settings[key] = entry.newValue;
+        changed = true;
+      }
+      if (changed) {
+        state.expanded = !state.settings.compactMode;
+        queueRender();
+      }
+    });
+
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type === "arx_force_refresh") {
+        renderNow();
+        sendResponse({ ok: true });
+        return;
+      }
+      if (message?.type === "arx_toggle_visibility") {
+        setOpenState(!state.open);
+        sendResponse({ ok: true, open: state.open });
+        return;
+      }
+    });
+  }
+
+  async function boot() {
+    await loadSettings();
+    setupListeners();
+    watchUrlChanges();
+    renderNow();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => {
+      boot();
+    }, { once: true });
+  } else {
+    boot();
+  }
+})();

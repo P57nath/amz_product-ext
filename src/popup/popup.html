@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Amazon Review Lens</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header>
+        <h1>Amazon Review Lens</h1>
+        <p>Floating product review intelligence settings</p>
+      </header>
+
+      <section>
+        <h2>Display</h2>
+        <label><input type="checkbox" id="openByDefault" /> Open by default</label>
+        <label><input type="checkbox" id="compactMode" /> Compact mode</label>
+        <label>Min confidence threshold <span id="minConfidenceValue">55</span></label>
+        <input type="range" min="0" max="100" step="1" id="minConfidence" />
+      </section>
+
+      <section>
+        <h2>Sections</h2>
+        <label><input type="checkbox" id="showPros" /> Pros</label>
+        <label><input type="checkbox" id="showCons" /> Cons</label>
+        <label><input type="checkbox" id="showSeller" /> Seller info</label>
+        <label><input type="checkbox" id="showTrust" /> Trust signals</label>
+        <label><input type="checkbox" id="showThemes" /> Themes</label>
+        <label><input type="checkbox" id="showRisks" /> Risk flags</label>
+      </section>
+
+      <section>
+        <h2>Backend crawl</h2>
+        <label><input type="checkbox" id="useBackendCrawl" /> Enable backend review crawling</label>
+        <label>Backend URL</label>
+        <input type="text" id="backendBaseUrl" placeholder="http://localhost:8787" />
+        <label>Pages to crawl (1-10)</label>
+        <input type="number" id="backendPages" min="1" max="10" step="1" />
+      </section>
+
+      <section>
+        <h2>AI analysis</h2>
+        <label><input type="checkbox" id="useAiAnalysis" /> Enable local AI scoring</label>
+        <label>Provider</label>
+        <select id="aiProvider">
+          <option value="backend">Python backend (open-source model)</option>
+          <option value="openai_direct">OpenAI direct (optional)</option>
+        </select>
+        <label>OpenAI API key (optional fallback only)</label>
+        <input type="password" id="openAiApiKey" placeholder="sk-..." />
+        <label>Model</label>
+        <input type="text" id="openAiModel" placeholder="nlptown/bert-base-multilingual-uncased-sentiment" />
+      </section>
+
+      <section>
+        <h2>Language</h2>
+        <label>Locale mode</label>
+        <select id="localeMode">
+          <option value="auto">Auto detect</option>
+          <option value="en">English</option>
+          <option value="es">Spanish</option>
+          <option value="de">German</option>
+          <option value="fr">French</option>
+          <option value="it">Italian</option>
+          <option value="ja">Japanese</option>
+        </select>
+      </section>
+
+      <footer>
+        <button id="saveBtn" class="primary">Save</button>
+        <button id="refreshBtn">Refresh current product</button>
+        <button id="toggleBtn">Toggle card</button>
+      </footer>
+      <div id="status"></div>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+  </html>
