@@ -4,7 +4,8 @@ Python backend API for:
 - Multi-page Amazon review crawling
 - Local AI scoring with open-source model (no OpenAI key required)
 
-Default model: `nlptown/bert-base-multilingual-uncased-sentiment`
+Default sentiment model: `cardiffnlp/twitter-xlm-roberta-base-sentiment`  
+Default zero-shot model: `MoritzLaurer/mDeBERTa-v3-base-mnli-xnli`
 
 ## Setup
 1. `cd backend`
@@ -24,7 +25,7 @@ Server runs at `http://localhost:8787`.
 ### `POST /api/ai/analyze` sample body
 ```json
 {
-  "model": "nlptown/bert-base-multilingual-uncased-sentiment",
+  "model": "cardiffnlp/twitter-xlm-roberta-base-sentiment",
   "locale": "en",
   "input": {
     "title": "Product title",

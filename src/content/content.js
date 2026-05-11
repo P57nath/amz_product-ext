@@ -24,7 +24,7 @@
     useAiAnalysis: true,
     aiProvider: "backend",
     openAiApiKey: "",
-    openAiModel: "nlptown/bert-base-multilingual-uncased-sentiment",
+    openAiModel: "cardiffnlp/twitter-xlm-roberta-base-sentiment",
     localeMode: "auto"
   };
 
@@ -89,13 +89,59 @@
     return (input?.value || "N/A").toUpperCase();
   }
 
-  function textFrom(node) {
-    return (node?.textContent || "").replace(/\s+/g, " ").trim();
+  function sanitizeExtractedText(value, maxLen = 260) {
+    let text = (value || "").replace(/\s+/g, " ").trim();
+    if (!text) {
+      return "";
+    }
+
+    const codeStartMatchers = [
+      /if\s*\(\s*window\./i,
+      /window\.[A-Za-z_$]/,
+      /P\.when\(/,
+      /function\s*\(/,
+      /var\s+[A-Za-z_$][\w$]*\s*=/,
+      /\._[A-Za-z0-9-]+_style_/,
+      /mix_csa/i
+    ];
+    let cutAt = -1;
+    for (const matcher of codeStartMatchers) {
+      const match = text.match(matcher);
+      if (match && match.index !== undefined) {
+        cutAt = cutAt === -1 ? match.index : Math.min(cutAt, match.index);
+      }
+    }
+    if (cutAt > 0) {
+      text = text.slice(0, cutAt).trim();
+    }
+
+    text = text
+      .replace(/\s{2,}/g, " ")
+      .replace(/\b(Add to Cart|Add to List|See Similar Items|Similar items shipping to)\b[\s\S]*$/i, "")
+      .trim();
+
+    if ((text.match(/[{};]/g) || []).length >= 8) {
+      return "";
+    }
+    if (text.length > maxLen) {
+      text = `${text.slice(0, maxLen - 1).trimEnd()}…`;
+    }
+    return text;
   }
 
-  function findText(selectors) {
+  function textFrom(node, maxLen = 260) {
+    if (!node) {
+      return "";
+    }
+
+    const clone = node.cloneNode(true);
+    clone.querySelectorAll("script, style, noscript, template").forEach((el) => el.remove());
+    return sanitizeExtractedText(clone.textContent || "", maxLen);
+  }
+
+  function findText(selectors, maxLen = 260) {
     for (const selector of selectors) {
-      const value = textFrom(document.querySelector(selector));
+      const value = textFrom(document.querySelector(selector), maxLen);
       if (value) {
         return value;
       }
@@ -147,6 +193,19 @@
     }
     const match = text.match(/(\d+)/);
     return match ? Number.parseInt(match[1], 10) : 0;
+  }
+
+  function findFirstCleanText(selectors, maxLen = 260) {
+    for (const selector of selectors) {
+      const nodes = Array.from(document.querySelectorAll(selector));
+      for (const node of nodes) {
+        const value = textFrom(node, maxLen);
+        if (value) {
+          return value;
+        }
+      }
+    }
+    return "";
   }
 
   function clamp(value, min, max) {
@@ -266,6 +325,16 @@
         verified: Boolean(block.querySelector("[data-hook='avp-badge'], [data-hook='avp-badge-linkless']"))
       };
     });
+  }
+
+  function buildReviewSnippets(reviews) {
+    return dedupe(
+      reviews
+        .map((review) => `${review.title || ""}. ${review.body || ""}`.trim())
+        .filter((text) => text.length >= 22)
+        .map((text) => text.length > 280 ? `${text.slice(0, 279).trimEnd()}…` : text),
+      24
+    );
   }
 
   function buildProsFromBullets() {
@@ -435,9 +504,29 @@
     const langPack = getLanguagePack();
     const reviews = parseReviewBlocks();
     const reviewAnalysis = analyzeReviews(reviews, langPack);
-    const sellerInfo = findText(["#merchant-info", "#sellerProfileTriggerId", "#tabular-buybox-truncate-1"]);
+    const sellerInfo = findFirstCleanText(
+      [
+        "#merchant-info",
+        "#merchantInfoFeature_feature_div",
+        "#tabular-buybox .tabular-buybox-text",
+        "#tabular-buybox-truncate-1",
+        "#aod-offer-soldBy .a-size-small",
+        "#shipsFromSoldBy_feature_div"
+      ],
+      220
+    );
     const sellerName =
-      findText(["#sellerProfileTriggerId", "#aod-offer-soldBy .a-size-small", "#merchant-info"]) || "Unknown";
+      findFirstCleanText(
+        [
+          "#sellerProfileTriggerId",
+          "#merchant-info a[href*='seller']",
+          "#tabular-buybox #sellerProfileTriggerId",
+          "#aod-offer-soldBy .a-size-small a",
+          "#aod-offer-soldBy .a-size-small",
+          "#shipsFromSoldBy_feature_div a"
+        ],
+        120
+      ) || "Unknown";
     const soldByAmazon = /sold by amazon/i.test(sellerInfo) || /amazon\./i.test(sellerName);
     const fulfilledByAmazon = /fulfilled by amazon/i.test(sellerInfo) || /ships from amazon/i.test(sellerInfo);
     const ratingText =
@@ -449,7 +538,7 @@
       locale: langPack.locale,
       url: location.href,
       title: findText(["#productTitle", "#title", "h1 span#title"]) || "Product",
-      brand: findText(["#bylineInfo", "#brand", "#brandSnapshot_feature_div"]) || "Not specified",
+      brand: findText(["#bylineInfo", "#brand", "#brandSnapshot_feature_div"], 140) || "Not specified",
       price:
         findText([
           "#corePrice_feature_div .a-price .a-offscreen",
@@ -458,12 +547,22 @@
           "#priceblock_ourprice",
           "#priceblock_dealprice",
           ".a-price .a-offscreen"
-        ]) || "N/A",
+        ], 80) || "N/A",
       rating: parseRating(ratingText),
       ratingCount: parseCount(
-        findText(["#acrCustomerReviewText", "span[data-hook='total-review-count']", "#reviews-medley-footer .a-link-normal"])
+        findText(["#acrCustomerReviewText", "span[data-hook='total-review-count']", "#reviews-medley-footer .a-link-normal"], 60)
       ),
-      availability: findText(["#availability span", "#outOfStock", "#availability"]) || "N/A",
+      availability:
+        findFirstCleanText(
+          [
+            "#availability .a-size-medium",
+            "#availability span.a-size-medium",
+            "#availability span",
+            "#outOfStock",
+            "#deliveryBlockMessage"
+          ],
+          220
+        ) || "N/A",
       seller: sellerName,
       soldByAmazon,
       fulfilledByAmazon,
@@ -475,6 +574,7 @@
       reviewVariance: reviewAnalysis.variance,
       pros: dedupe([...buildProsFromBullets(), ...reviewAnalysis.pros], 6),
       cons: dedupe(reviewAnalysis.cons, 6),
+      reviewSnippets: buildReviewSnippets(reviews),
       topPositiveTerms: reviewAnalysis.topPositiveTerms,
       topNegativeTerms: reviewAnalysis.topNegativeTerms,
       riskFlags: []
@@ -820,6 +920,7 @@
           badges: data.badges,
           pros: data.pros,
           cons: data.cons,
+          reviewSnippets: data.reviewSnippets || [],
           positiveThemes: data.topPositiveTerms,
           negativeThemes: data.topNegativeTerms,
           riskFlags: data.riskFlags

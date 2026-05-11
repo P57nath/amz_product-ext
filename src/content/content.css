@@ -4,17 +4,19 @@
 }
 
 #arx-root.arx-host {
-  position: relative;
+  position: fixed;
+  top: 86px;
+  right: 14px;
   z-index: 2147483640;
   display: flex;
   justify-content: flex-end;
-  margin: 10px 14px 8px;
+  margin: 0;
   pointer-events: none;
 }
 
 #arx-root .arx-card-shell {
   width: min(380px, 95vw);
-  max-height: 78vh;
+  max-height: calc(100vh - 120px);
   overflow: auto;
   border-radius: 18px;
   border: 1px solid rgba(8, 47, 54, 0.16);
@@ -287,13 +289,17 @@
 
 @media (max-width: 800px) {
   #arx-root.arx-host {
+    top: auto;
+    right: 8px;
+    left: 8px;
+    bottom: 72px;
     justify-content: center;
-    margin: 8px;
+    margin: 0;
   }
 
   #arx-root .arx-card-shell {
     width: min(96vw, 420px);
-    max-height: 70vh;
+    max-height: 62vh;
   }
 
   #arx-root .arx-score-row {

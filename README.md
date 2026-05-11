@@ -45,7 +45,7 @@ From extension popup:
 2. Choose provider:
    - `Python backend (open-source model)` (recommended, no key needed)
    - `OpenAI direct` (optional fallback)
-3. Choose model (default `nlptown/bert-base-multilingual-uncased-sentiment`)
+3. Choose model (default `cardiffnlp/twitter-xlm-roberta-base-sentiment`)
 4. Refresh current product page from popup
 
 ## Important notes

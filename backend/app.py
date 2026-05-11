@@ -11,7 +11,15 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-MODEL_NAME_DEFAULT = os.getenv("MODEL_NAME", "nlptown/bert-base-multilingual-uncased-sentiment")
+SENTIMENT_MODEL_DEFAULT = os.getenv(
+    "SENTIMENT_MODEL",
+    "cardiffnlp/twitter-xlm-roberta-base-sentiment",
+)
+ZERO_SHOT_MODEL_DEFAULT = os.getenv(
+    "ZERO_SHOT_MODEL",
+    "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
+)
+ENABLE_ZERO_SHOT = os.getenv("ENABLE_ZERO_SHOT", "1").strip().lower() in {"1", "true", "yes", "on"}
 REQUEST_HEADERS = {
     "user-agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -32,7 +40,7 @@ app.add_middleware(
 
 
 class AIAnalyzeRequest(BaseModel):
-    model: str = Field(default=MODEL_NAME_DEFAULT)
+    model: str = Field(default=SENTIMENT_MODEL_DEFAULT)
     locale: str = Field(default="en")
     input: dict[str, Any] = Field(default_factory=dict)
 
@@ -46,8 +54,8 @@ class ParsedReview:
     verified: bool
 
 
-_classifier = None
-_classifier_error = None
+_pipeline_cache: dict[str, Any] = {}
+_pipeline_errors: dict[str, str] = {}
 
 
 @app.get("/health")
@@ -55,8 +63,11 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "amazon-review-lens-python-backend",
-        "model_loaded": _classifier is not None,
-        "model_error": _classifier_error,
+        "sentiment_model_default": SENTIMENT_MODEL_DEFAULT,
+        "zero_shot_model_default": ZERO_SHOT_MODEL_DEFAULT,
+        "zero_shot_enabled": ENABLE_ZERO_SHOT,
+        "loaded_pipelines": list(_pipeline_cache.keys()),
+        "pipeline_errors": _pipeline_errors,
     }
 
 
@@ -101,7 +112,7 @@ def reviews_summary(
 
 @app.post("/api/ai/analyze")
 def ai_analyze(payload: AIAnalyzeRequest) -> dict[str, Any]:
-    model_name = (payload.model or MODEL_NAME_DEFAULT).strip()
+    model_name = (payload.model or SENTIMENT_MODEL_DEFAULT).strip()
     data = payload.input or {}
     review_texts = build_review_texts(data)
     if not review_texts:
@@ -111,20 +122,22 @@ def ai_analyze(payload: AIAnalyzeRequest) -> dict[str, Any]:
     sentiment_avg = mean(star_predictions) if star_predictions else 3.0
     sentiment_conf = compute_sentiment_confidence(star_predictions)
 
+    aspect_summary = classify_aspects(review_texts) if ENABLE_ZERO_SHOT else {"pros": [], "cons": [], "risks": []}
+
     authenticity_base = safe_int(data.get("authenticityScore"), 50)
     confidence_base = safe_int(data.get("confidenceScore"), 45)
 
     authenticity = clamp_int(round((authenticity_base * 0.6) + ((sentiment_avg / 5.0) * 100.0 * 0.4)), 0, 100)
     confidence = clamp_int(round((confidence_base * 0.55) + (sentiment_conf * 0.45)), 0, 100)
 
-    pros = dedupe_strings(data.get("pros", []), 6)
-    cons = dedupe_strings(data.get("cons", []), 6)
+    pros = dedupe_strings([*data.get("pros", []), *aspect_summary["pros"]], 6)
+    cons = dedupe_strings([*data.get("cons", []), *aspect_summary["cons"]], 6)
     if sentiment_avg >= 4.1 and not pros:
         pros = ["Overall review tone is strongly positive in sampled texts."]
     if sentiment_avg <= 2.5 and not cons:
         cons = ["Overall review tone trends negative in sampled texts."]
 
-    risk_flags = dedupe_strings(data.get("riskFlags", []), 8)
+    risk_flags = dedupe_strings([*data.get("riskFlags", []), *aspect_summary["risks"]], 8)
     if sentiment_avg <= 2.7:
         risk_flags.insert(0, "Open-source sentiment model detects low average sentiment.")
     if safe_float(data.get("verifiedRatio"), 0.0) < 0.35:
@@ -141,8 +154,8 @@ def ai_analyze(payload: AIAnalyzeRequest) -> dict[str, Any]:
     locale = (payload.locale or "en").lower()
     recommendation = build_recommendation(authenticity, confidence, sentiment_avg)
     summary = (
-        f"Locale {locale}. Open-source model sentiment average is {sentiment_avg:.2f}/5 "
-        f"from {len(star_predictions)} inferred samples. "
+        f"Locale {locale}. Sentiment model average is {sentiment_avg:.2f}/5 "
+        f"from {len(star_predictions)} samples. "
         f"Authenticity {authenticity}/100 and confidence {confidence}/100."
     )
 
@@ -326,27 +339,108 @@ def predict_stars(texts: list[str], model_name: str) -> list[float]:
             if isinstance(output, list) and output:
                 row = output[0] if isinstance(output[0], dict) else None
                 label = str((row or {}).get("label", ""))
-                match = re.search(r"([1-5])", label)
-                if match:
-                    stars.append(float(match.group(1)))
+                score = float((row or {}).get("score", 0.0))
+                mapped = label_to_star(label, score)
+                if mapped is not None:
+                    stars.append(mapped)
         except Exception:
             continue
     return stars
 
 
 def get_classifier(model_name: str):
-    global _classifier, _classifier_error
-    if _classifier is not None:
-        return _classifier
-    if _classifier_error is not None:
+    key = f"text-classification::{model_name}"
+    if key in _pipeline_cache:
+        return _pipeline_cache[key]
+    if key in _pipeline_errors:
         return None
     try:
         from transformers import pipeline  # type: ignore
-        _classifier = pipeline("text-classification", model=model_name, tokenizer=model_name)
-        return _classifier
+        classifier = pipeline("text-classification", model=model_name, tokenizer=model_name)
+        _pipeline_cache[key] = classifier
+        return classifier
     except Exception as exc:
-        _classifier_error = str(exc)
+        _pipeline_errors[key] = str(exc)
         return None
+
+
+def get_zero_shot_classifier(model_name: str):
+    key = f"zero-shot-classification::{model_name}"
+    if key in _pipeline_cache:
+        return _pipeline_cache[key]
+    if key in _pipeline_errors:
+        return None
+    try:
+        from transformers import pipeline  # type: ignore
+        classifier = pipeline("zero-shot-classification", model=model_name, tokenizer=model_name)
+        _pipeline_cache[key] = classifier
+        return classifier
+    except Exception as exc:
+        _pipeline_errors[key] = str(exc)
+        return None
+
+
+def classify_aspects(texts: list[str]) -> dict[str, list[str]]:
+    classifier = get_zero_shot_classifier(ZERO_SHOT_MODEL_DEFAULT)
+    if classifier is None:
+        return {"pros": [], "cons": [], "risks": []}
+
+    candidate_labels = [
+        "build quality issue",
+        "value for money",
+        "shipping or delivery issue",
+        "seller trust concern",
+        "easy to use",
+        "works as expected",
+    ]
+    pros: list[str] = []
+    cons: list[str] = []
+    risks: list[str] = []
+
+    for text in texts[:18]:
+        try:
+            result = classifier(text[:360], candidate_labels, multi_label=True)
+        except Exception:
+            continue
+        labels = result.get("labels", [])
+        scores = result.get("scores", [])
+        if not labels or not scores:
+            continue
+        for label, score in zip(labels, scores):
+            if score < 0.60:
+                continue
+            if label in {"value for money", "easy to use", "works as expected"}:
+                pros.append(f"{label} signal found.")
+            if label in {"build quality issue", "shipping or delivery issue"}:
+                cons.append(f"{label} signal found.")
+            if label in {"seller trust concern", "shipping or delivery issue"}:
+                risks.append(f"{label} signal found.")
+
+    return {
+        "pros": dedupe_strings(pros, 4),
+        "cons": dedupe_strings(cons, 4),
+        "risks": dedupe_strings(risks, 4),
+    }
+
+
+def label_to_star(label: str, score: float) -> float | None:
+    normalized = (label or "").strip().lower()
+    digit = re.search(r"([1-5])", normalized)
+    if digit:
+        return float(digit.group(1))
+    if "positive" in normalized:
+        return 4.0 + min(1.0, score)
+    if "neutral" in normalized:
+        return 3.0
+    if "negative" in normalized:
+        return 2.0 - min(1.0, score)
+    if normalized in {"label_2"}:
+        return 4.5
+    if normalized in {"label_1"}:
+        return 3.0
+    if normalized in {"label_0"}:
+        return 1.5
+    return None
 
 
 def fallback_sentiment_stars(texts: list[str]) -> list[float]:
@@ -368,7 +462,7 @@ def fallback_sentiment_stars(texts: list[str]) -> list[float]:
 
 def build_review_texts(data: dict[str, Any]) -> list[str]:
     texts: list[str] = []
-    for key in ("pros", "cons", "riskFlags"):
+    for key in ("pros", "cons", "riskFlags", "reviewSnippets"):
         for item in data.get(key, []) or []:
             value = clean_text(str(item))
             if value:
@@ -459,7 +553,7 @@ def pick_first_sentence(text: str) -> str:
 
 
 def tokenize(text: str, stop_words: set[str]) -> list[str]:
-    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ']{2,}", text.lower())
+    words = re.findall(r"[^\W\d_']{2,}", text.lower(), flags=re.UNICODE)
     return [w for w in words if w not in stop_words]
 
 

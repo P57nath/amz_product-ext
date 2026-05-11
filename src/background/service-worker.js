@@ -14,7 +14,7 @@ const DEFAULT_SETTINGS = {
   useAiAnalysis: true,
   aiProvider: "backend",
   openAiApiKey: "",
-  openAiModel: "nlptown/bert-base-multilingual-uncased-sentiment",
+  openAiModel: "cardiffnlp/twitter-xlm-roberta-base-sentiment",
   localeMode: "auto"
 };
 
