@@ -3,10 +3,13 @@
 Amazon product intelligence extension with:
 - Compact floating card (shown before product section, not across the full page)
 - Local review parsing (pros, cons, seller trust, risk signals)
-- Popup settings (compact mode, thresholds, section toggles)
+- Decision Mode (`BUY` / `MAYBE` / `AVOID`) with reasons + "what would change"
+- Popup settings (compact mode, thresholds, section toggles, personalization, cache, feedback)
 - Multilingual dictionaries (`en`, `es`, `de`, `fr`, `it`, `ja`, plus auto detect)
 - Python backend review crawling for stronger confidence/authenticity scoring
 - Open-source AI integration (no OpenAI key required) via backend endpoint
+- Suspicion score (repetition + burst + imbalance), timeline trend, and alternatives comparison
+- Explainability panel with clickable evidence snippets and feedback loop
 
 ## Architecture
 - Extension:
@@ -42,14 +45,11 @@ Default backend URL is `http://localhost:8787`.
 ## Using AI integration
 From extension popup:
 1. Enable `AI scoring`
-2. Choose provider:
-   - `Python backend (open-source model)` (recommended, no key needed)
-   - `OpenAI direct` (optional fallback)
+2. Keep backend running (`http://localhost:8787`)
 3. Choose model (default `cardiffnlp/twitter-xlm-roberta-base-sentiment`)
 4. Refresh current product page from popup
 
 ## Important notes
 - Open-source backend model requires first-time model download from Hugging Face.
-- OpenAI key is optional and only needed if you explicitly select `OpenAI direct`.
 - Amazon anti-bot protections can limit backend crawl quality depending on IP/region/traffic.
 - This is a production-grade scaffold; add monitoring, retries, caching, and stricter validation before public release.

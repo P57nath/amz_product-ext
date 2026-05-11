@@ -1,0 +1,18 @@
+# Python runtime / caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Local backend env and generated data
+backend/.venv/
+backend/.env
+backend/feedback.jsonl
+
+# Optional local model/cache directories
+.cache/
+cache/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

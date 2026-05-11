@@ -8,14 +8,22 @@ const DEFAULT_SETTINGS = {
   showTrust: true,
   showThemes: true,
   showRisks: true,
+  showExplainability: true,
+  showAlternatives: true,
+  showTimeline: true,
   useBackendCrawl: true,
   backendBaseUrl: "http://localhost:8787",
   backendPages: 3,
   useAiAnalysis: true,
-  aiProvider: "backend",
-  openAiApiKey: "",
   openAiModel: "cardiffnlp/twitter-xlm-roberta-base-sentiment",
-  localeMode: "auto"
+  localeMode: "auto",
+  userCountry: "Bangladesh",
+  budgetMax: "",
+  preferredBrands: "",
+  avoidBrands: "",
+  useCase: "",
+  cacheMinutes: 30,
+  enableFeedback: true
 };
 
 const FIELD_IDS = Object.keys(DEFAULT_SETTINGS);
@@ -67,9 +75,14 @@ function collectSettingsFromForm() {
 
   output.minConfidence = clamp(parseInt(output.minConfidence, 10) || DEFAULT_SETTINGS.minConfidence, 0, 100);
   output.backendPages = clamp(parseInt(output.backendPages, 10) || DEFAULT_SETTINGS.backendPages, 1, 10);
+  output.cacheMinutes = clamp(parseInt(output.cacheMinutes, 10) || DEFAULT_SETTINGS.cacheMinutes, 1, 240);
   output.backendBaseUrl = String(output.backendBaseUrl || "").trim() || DEFAULT_SETTINGS.backendBaseUrl;
+  output.userCountry = String(output.userCountry || "").trim() || DEFAULT_SETTINGS.userCountry;
+  output.budgetMax = String(output.budgetMax || "").trim();
+  output.preferredBrands = String(output.preferredBrands || "").trim();
+  output.avoidBrands = String(output.avoidBrands || "").trim();
+  output.useCase = String(output.useCase || "").trim();
   output.openAiModel = String(output.openAiModel || "").trim() || DEFAULT_SETTINGS.openAiModel;
-  output.aiProvider = output.aiProvider === "openai_direct" ? "openai_direct" : "backend";
   output.localeMode = ["auto", "en", "es", "de", "fr", "it", "ja"].includes(output.localeMode)
     ? output.localeMode
     : "auto";

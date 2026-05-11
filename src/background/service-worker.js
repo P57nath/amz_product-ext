@@ -8,14 +8,22 @@ const DEFAULT_SETTINGS = {
   showTrust: true,
   showThemes: true,
   showRisks: true,
+  showExplainability: true,
+  showAlternatives: true,
+  showTimeline: true,
   useBackendCrawl: true,
   backendBaseUrl: "http://localhost:8787",
   backendPages: 3,
   useAiAnalysis: true,
-  aiProvider: "backend",
-  openAiApiKey: "",
   openAiModel: "cardiffnlp/twitter-xlm-roberta-base-sentiment",
-  localeMode: "auto"
+  localeMode: "auto",
+  userCountry: "Bangladesh",
+  budgetMax: "",
+  preferredBrands: "",
+  avoidBrands: "",
+  useCase: "",
+  cacheMinutes: 30,
+  enableFeedback: true
 };
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -52,6 +60,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (type === "arx_save_feedback") {
+    saveFeedback(message.payload)
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
+    return true;
+  }
+
   sendResponse({ ok: false, error: `Unsupported message type: ${type}` });
   return false;
 });
@@ -79,11 +94,27 @@ async function crawlBackend(payload) {
 
 async function runAiAnalysis(payload) {
   const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
-  const provider = payload?.provider || settings.aiProvider || "openai_direct";
-  if (provider === "backend") {
-    return runBackendAi(payload, settings);
+  return runBackendAi(payload, settings);
+}
+
+async function saveFeedback(payload) {
+  const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
+  const baseUrl = (payload?.baseUrl || settings.backendBaseUrl || "").replace(/\/+$/, "");
+  if (!baseUrl) {
+    throw new Error("Backend URL is empty.");
   }
-  return runOpenAiDirect(payload, settings);
+  const response = await fetch(`${baseUrl}/api/feedback`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload || {})
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Feedback save failed (${response.status}): ${text.slice(0, 240)}`);
+  }
+  return response.json();
 }
 
 async function runBackendAi(payload, settings) {
@@ -107,119 +138,4 @@ async function runBackendAi(payload, settings) {
     throw new Error(`Backend AI failed (${response.status}): ${text.slice(0, 240)}`);
   }
   return response.json();
-}
-
-async function runOpenAiDirect(payload, settings) {
-  const apiKey = (payload?.apiKey || settings.openAiApiKey || "").trim();
-  if (!apiKey) {
-    throw new Error("OpenAI API key is missing in extension settings.");
-  }
-  const model = payload?.model || settings.openAiModel || "gpt-5-mini";
-  const locale = payload?.locale || "en";
-  const promptPayload = payload?.input || {};
-
-  const schema = {
-    type: "object",
-    additionalProperties: false,
-    required: [
-      "summary",
-      "pros",
-      "cons",
-      "sellerNotes",
-      "riskFlags",
-      "authenticityScore",
-      "confidenceScore",
-      "recommendation"
-    ],
-    properties: {
-      summary: { type: "string" },
-      pros: { type: "array", items: { type: "string" }, maxItems: 6 },
-      cons: { type: "array", items: { type: "string" }, maxItems: 6 },
-      sellerNotes: { type: "array", items: { type: "string" }, maxItems: 4 },
-      riskFlags: { type: "array", items: { type: "string" }, maxItems: 6 },
-      authenticityScore: { type: "integer", minimum: 0, maximum: 100 },
-      confidenceScore: { type: "integer", minimum: 0, maximum: 100 },
-      recommendation: { type: "string" }
-    }
-  };
-
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model,
-      input: [
-        {
-          role: "system",
-          content:
-            "You are a product review authenticity analyst. Return JSON only, no markdown. Stay concise and practical."
-        },
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text:
-                `Locale: ${locale}\n` +
-                "Analyze the provided product review snapshot and return structured JSON with factual caution. " +
-                "Do not invent unavailable evidence.\n\n" +
-                JSON.stringify(promptPayload)
-            }
-          ]
-        }
-      ],
-      text: {
-        format: {
-          type: "json_schema",
-          name: "review_ai_analysis",
-          schema,
-          strict: true
-        }
-      }
-    })
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`OpenAI request failed (${response.status}): ${text.slice(0, 280)}`);
-  }
-
-  const data = await response.json();
-  const parsed = parseStructuredResponse(data);
-  if (!parsed) {
-    throw new Error("Failed to parse structured AI response.");
-  }
-  return parsed;
-}
-
-function parseStructuredResponse(responseJson) {
-  if (!responseJson) {
-    return null;
-  }
-  if (typeof responseJson.output_text === "string" && responseJson.output_text.trim().startsWith("{")) {
-    try {
-      return JSON.parse(responseJson.output_text);
-    } catch {
-      return null;
-    }
-  }
-
-  const output = Array.isArray(responseJson.output) ? responseJson.output : [];
-  for (const item of output) {
-    const content = Array.isArray(item?.content) ? item.content : [];
-    for (const chunk of content) {
-      const candidate = chunk?.text || chunk?.output_text || "";
-      if (typeof candidate === "string" && candidate.trim().startsWith("{")) {
-        try {
-          return JSON.parse(candidate);
-        } catch {
-          continue;
-        }
-      }
-    }
-  }
-  return null;
 }

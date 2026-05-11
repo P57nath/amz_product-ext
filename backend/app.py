@@ -2,6 +2,8 @@ import math
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
 from statistics import mean
 from typing import Any
 
@@ -45,6 +47,15 @@ class AIAnalyzeRequest(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
 
 
+class FeedbackRequest(BaseModel):
+    asin: str = Field(min_length=2, max_length=20)
+    url: str = Field(min_length=4)
+    decision: str = Field(default="")
+    helpful: bool
+    comment: str = Field(default="", max_length=400)
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
 @dataclass
 class ParsedReview:
     stars: float | None
@@ -52,6 +63,7 @@ class ParsedReview:
     body: str
     helpful: int
     verified: bool
+    date_text: str
 
 
 _pipeline_cache: dict[str, Any] = {}
@@ -105,6 +117,11 @@ def reviews_summary(
         "topPositiveTerms": summary["top_positive_terms"],
         "topNegativeTerms": summary["top_negative_terms"],
         "riskFlags": summary["risk_flags"],
+        "suspicionScore": summary["suspicion_score"],
+        "suspicionSignals": summary["suspicion_signals"],
+        "trend": summary["trend"],
+        "evidence": summary["evidence"],
+        "decision": summary["decision"],
         "authenticityScore": summary["authenticity_score"],
         "confidenceScore": summary["confidence_score"],
     }
@@ -171,6 +188,23 @@ def ai_analyze(payload: AIAnalyzeRequest) -> dict[str, Any]:
     }
 
 
+@app.post("/api/feedback")
+def save_feedback(payload: FeedbackRequest) -> dict[str, Any]:
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "asin": payload.asin.strip().upper(),
+        "url": payload.url,
+        "decision": payload.decision,
+        "helpful": bool(payload.helpful),
+        "comment": payload.comment.strip(),
+        "context": payload.context,
+    }
+    path = os.getenv("FEEDBACK_FILE", "feedback.jsonl")
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return {"ok": True}
+
+
 def crawl_review_pages(host: str, asin: str, pages: int) -> dict[str, Any]:
     items: list[ParsedReview] = []
     pages_crawled = 0
@@ -210,6 +244,7 @@ def parse_reviews_from_html(html: str) -> list[ParsedReview]:
         title = clean_text(first_text(row, ["[data-hook='review-title']"]))
         body = clean_text(first_text(row, ["[data-hook='review-body'] span", "[data-hook='review-collapsed']"]))
         helpful = parse_helpful_votes(clean_text(first_text(row, ["[data-hook='helpful-vote-statement']"])))
+        date_text = clean_text(first_text(row, ["[data-hook='review-date']"]))
         verified = row.select_one("[data-hook='avp-badge'], [data-hook='avp-badge-linkless']") is not None
         if not title and not body:
             continue
@@ -220,6 +255,7 @@ def parse_reviews_from_html(html: str) -> list[ParsedReview]:
                 body=body,
                 helpful=helpful,
                 verified=verified,
+                date_text=date_text,
             )
         )
     return reviews
@@ -247,11 +283,16 @@ def build_review_summary(reviews: list[ParsedReview], pages_crawled: int) -> dic
     cons: list[str] = []
     pos_terms: dict[str, int] = {}
     neg_terms: dict[str, int] = {}
+    all_texts: list[str] = []
+    date_texts: list[str] = []
 
     for review in reviews:
         txt = clean_text(f"{review.title}. {review.body}")
         if not txt:
             continue
+        all_texts.append(txt)
+        if review.date_text:
+            date_texts.append(review.date_text)
         helpful_votes += review.helpful
         if review.verified:
             verified_count += 1
@@ -285,20 +326,44 @@ def build_review_summary(reviews: list[ParsedReview], pages_crawled: int) -> dic
     variance = round(compute_variance(stars), 3) if len(stars) > 1 else 0.0
     verified_ratio = (verified_count / sample_reviews) if sample_reviews > 0 else 0.0
 
+    star_hist = {str(i): 0 for i in range(1, 6)}
+    for value in stars:
+        bucket = str(clamp_int(int(round(value)), 1, 5))
+        star_hist[bucket] += 1
+    low_ratio = (star_hist["1"] + star_hist["2"]) / max(1, len(stars))
+    high_ratio = (star_hist["4"] + star_hist["5"]) / max(1, len(stars))
+    imbalance = abs(high_ratio - low_ratio)
+
+    repetition = repetition_score(all_texts)
+    burst = burst_score(date_texts)
+    suspicion_score = clamp_int(round((repetition * 0.45) + (burst * 0.35) + (imbalance * 100.0 * 0.2)), 0, 100)
+    suspicion_signals = []
+    if repetition >= 45:
+        suspicion_signals.append("Multiple reviews share highly similar wording.")
+    if burst >= 45:
+        suspicion_signals.append("Review dates appear concentrated in a narrow time window.")
+    if imbalance >= 0.75 and len(stars) >= 18:
+        suspicion_signals.append("Strong star imbalance between high and low ratings.")
+
+    trend = rating_trend(stars)
+
     authenticity = 50.0 + ((verified_ratio - 0.5) * 45.0)
     if rating_count >= 120:
-      authenticity += 10.0
+        authenticity += 10.0
     elif rating_count < 20:
-      authenticity -= 8.0
+        authenticity -= 8.0
     if variance > 1.8:
-      authenticity -= 4.0
+        authenticity -= 4.0
+    authenticity -= suspicion_score * 0.08
     authenticity_score = clamp_int(round(authenticity), 0, 100)
 
     confidence = 20.0 + min(40.0, float(rating_count)) * 1.7
     if avg_stars is not None:
-      confidence += 10.0
+        confidence += 10.0
     if pages_crawled > 1:
-      confidence += 8.0
+        confidence += 8.0
+    if trend["direction"] == "declining":
+        confidence -= 6.0
     confidence_score = clamp_int(round(confidence), 0, 100)
 
     risk_flags = []
@@ -308,6 +373,21 @@ def build_review_summary(reviews: list[ParsedReview], pages_crawled: int) -> dic
         risk_flags.append("Low verified-purchase ratio in crawled sample.")
     if variance > 1.8:
         risk_flags.append("Crawled reviews are highly polarized.")
+    if suspicion_score >= 60:
+        risk_flags.append("Suspicion score is elevated from repetition/timing patterns.")
+    if trend["direction"] == "declining":
+        risk_flags.append("Recent review trend is weaker than older reviews.")
+
+    decision = build_decision(authenticity_score, confidence_score, suspicion_score, verified_ratio)
+    evidence = build_evidence_points(
+        authenticity_score,
+        confidence_score,
+        suspicion_score,
+        verified_ratio,
+        sample_reviews,
+        trend,
+        star_hist,
+    )
 
     return {
         "pages_crawled": pages_crawled,
@@ -322,6 +402,11 @@ def build_review_summary(reviews: list[ParsedReview], pages_crawled: int) -> dic
         "top_positive_terms": top_terms(pos_terms, 6),
         "top_negative_terms": top_terms(neg_terms, 6),
         "risk_flags": risk_flags,
+        "suspicion_score": suspicion_score,
+        "suspicion_signals": suspicion_signals,
+        "trend": trend,
+        "decision": decision,
+        "evidence": evidence,
         "authenticity_score": authenticity_score,
         "confidence_score": confidence_score,
     }
@@ -501,6 +586,109 @@ def compute_sentiment_confidence(stars: list[float]) -> int:
     return clamp_int(round(confidence), 0, 100)
 
 
+def repetition_score(texts: list[str]) -> float:
+    if len(texts) < 4:
+        return 0.0
+    normalized = [normalize_text_for_dup(x) for x in texts if normalize_text_for_dup(x)]
+    if len(normalized) < 4:
+        return 0.0
+    counts: dict[str, int] = {}
+    for text in normalized:
+        counts[text] = counts.get(text, 0) + 1
+    repeated = sum(v for v in counts.values() if v >= 2)
+    return min(100.0, (repeated / len(normalized)) * 100.0)
+
+
+def burst_score(date_texts: list[str]) -> float:
+    buckets: dict[str, int] = {}
+    for raw in date_texts:
+        month = extract_month_key(raw)
+        if not month:
+            continue
+        buckets[month] = buckets.get(month, 0) + 1
+    total = sum(buckets.values())
+    if total < 6:
+        return 0.0
+    top_bucket = max(buckets.values())
+    concentration = top_bucket / total
+    if concentration <= 0.34:
+        return 0.0
+    return min(100.0, (concentration - 0.34) * 180.0)
+
+
+def rating_trend(stars: list[float]) -> dict[str, Any]:
+    if len(stars) < 9:
+        return {"direction": "unknown", "recentAvg": None, "olderAvg": None, "message": "Not enough trend data."}
+    chunk = max(3, len(stars) // 3)
+    recent = stars[:chunk]
+    older = stars[-chunk:]
+    recent_avg = round(mean(recent), 2)
+    older_avg = round(mean(older), 2)
+    delta = recent_avg - older_avg
+    if delta >= 0.35:
+        direction = "improving"
+        message = "Recent reviews are stronger than older reviews."
+    elif delta <= -0.35:
+        direction = "declining"
+        message = "Recent reviews are weaker than older reviews."
+    else:
+        direction = "stable"
+        message = "Recent and older reviews are broadly stable."
+    return {"direction": direction, "recentAvg": recent_avg, "olderAvg": older_avg, "message": message}
+
+
+def build_decision(authenticity: int, confidence: int, suspicion: int, verified_ratio: float) -> dict[str, Any]:
+    score = (authenticity * 0.45) + (confidence * 0.35) + ((100 - suspicion) * 0.2)
+    reasons: list[str] = []
+    changes: list[str] = []
+    if authenticity >= 72:
+        reasons.append("Authenticity score is strong.")
+    if confidence >= 70:
+        reasons.append("Confidence score is strong.")
+    if suspicion <= 30:
+        reasons.append("Suspicion score is low.")
+    if verified_ratio >= 0.6:
+        reasons.append("Verified purchase ratio is healthy.")
+    if authenticity < 60:
+        changes.append("Higher verified ratio or better seller transparency would improve confidence.")
+    if confidence < 60:
+        changes.append("More recent reviews across multiple pages would improve confidence.")
+    if suspicion > 45:
+        changes.append("Lower wording/date concentration would reduce suspicion risk.")
+    if verified_ratio < 0.45:
+        changes.append("More verified purchase evidence would improve trust.")
+    if score >= 72 and confidence >= 60 and suspicion <= 45:
+        label = "BUY"
+    elif score <= 45 or suspicion >= 70:
+        label = "AVOID"
+    else:
+        label = "MAYBE"
+    return {
+        "label": label,
+        "score": round(score, 1),
+        "reasons": dedupe_strings(reasons, 4),
+        "whatWouldChange": dedupe_strings(changes, 4),
+    }
+
+
+def build_evidence_points(
+    authenticity: int,
+    confidence: int,
+    suspicion: int,
+    verified_ratio: float,
+    sample_reviews: int,
+    trend: dict[str, Any],
+    star_hist: dict[str, int],
+) -> list[dict[str, Any]]:
+    return [
+        {"key": "authenticity", "label": "Authenticity", "value": authenticity, "evidence": f"Verified ratio {round(verified_ratio * 100)}% with {sample_reviews} sampled reviews."},
+        {"key": "confidence", "label": "Confidence", "value": confidence, "evidence": f"Confidence reflects volume ({sample_reviews}) and variance checks."},
+        {"key": "suspicion", "label": "Suspicion", "value": suspicion, "evidence": "Suspicion blends wording repetition, date concentration, and star imbalance."},
+        {"key": "trend", "label": "Trend", "value": trend.get("direction", "unknown"), "evidence": trend.get("message", "Trend unavailable.")},
+        {"key": "distribution", "label": "Star Distribution", "value": star_hist, "evidence": f"1*: {star_hist['1']} | 2*: {star_hist['2']} | 3*: {star_hist['3']} | 4*: {star_hist['4']} | 5*: {star_hist['5']}"},
+    ]
+
+
 def extract_amazon_host(url: str) -> str | None:
     match = re.match(r"^https?://([^/]+)", url.strip(), re.IGNORECASE)
     if not match:
@@ -509,6 +697,32 @@ def extract_amazon_host(url: str) -> str | None:
     if "amazon." not in host:
         return None
     return host
+
+
+def normalize_text_for_dup(text: str) -> str:
+    cleaned = clean_text(text).lower()
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) < 40:
+        return ""
+    return cleaned[:220]
+
+
+def extract_month_key(raw: str) -> str | None:
+    text = raw.lower()
+    # matches forms like "January 2026" or localized dates containing 2026 and month word
+    month_words = [
+        "january", "february", "march", "april", "may", "june",
+        "july", "august", "september", "october", "november", "december",
+    ]
+    year_match = re.search(r"(20\d{2})", text)
+    if not year_match:
+        return None
+    year = year_match.group(1)
+    for idx, month in enumerate(month_words, start=1):
+        if month in text:
+            return f"{year}-{idx:02d}"
+    return year
 
 
 def parse_rating(text: str) -> float | None:

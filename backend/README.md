@@ -21,6 +21,7 @@ Server runs at `http://localhost:8787`.
 - `GET /health`
 - `GET /api/reviews/summary?asin=<ASIN>&url=<AmazonProductURL>&pages=3`
 - `POST /api/ai/analyze`
+- `POST /api/feedback`
 
 ### `POST /api/ai/analyze` sample body
 ```json
@@ -39,3 +40,4 @@ Server runs at `http://localhost:8787`.
 - First model load downloads weights from Hugging Face.
 - If model loading fails, backend falls back to rule-based sentiment heuristics.
 - Amazon may throttle automated crawling depending on IP, region, and request volume.
+- Feedback records are stored in `feedback.jsonl` (or `FEEDBACK_FILE` path).

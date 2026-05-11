@@ -24,7 +24,6 @@
     "https://*.amazon.com.br/*",
     "https://*.amazon.com.mx/*",
     "https://*.amazon.co.jp/*",
-    "https://api.openai.com/*",
     "http://localhost/*",
     "http://127.0.0.1/*"
   ],

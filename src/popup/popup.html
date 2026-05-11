@@ -29,6 +29,9 @@
         <label><input type="checkbox" id="showTrust" /> Trust signals</label>
         <label><input type="checkbox" id="showThemes" /> Themes</label>
         <label><input type="checkbox" id="showRisks" /> Risk flags</label>
+        <label><input type="checkbox" id="showExplainability" /> Explainability</label>
+        <label><input type="checkbox" id="showAlternatives" /> Alternatives compare</label>
+        <label><input type="checkbox" id="showTimeline" /> Timeline trend</label>
       </section>
 
       <section>
@@ -43,14 +46,7 @@
       <section>
         <h2>AI analysis</h2>
         <label><input type="checkbox" id="useAiAnalysis" /> Enable local AI scoring</label>
-        <label>Provider</label>
-        <select id="aiProvider">
-          <option value="backend">Python backend (open-source model)</option>
-          <option value="openai_direct">OpenAI direct (optional)</option>
-        </select>
-        <label>OpenAI API key (optional fallback only)</label>
-        <input type="password" id="openAiApiKey" placeholder="sk-..." />
-        <label>Model</label>
+        <label>Model (backend)</label>
         <input type="text" id="openAiModel" placeholder="cardiffnlp/twitter-xlm-roberta-base-sentiment" />
       </section>
 
@@ -66,6 +62,27 @@
           <option value="it">Italian</option>
           <option value="ja">Japanese</option>
         </select>
+      </section>
+
+      <section>
+        <h2>Personalization</h2>
+        <label>Delivery country</label>
+        <input type="text" id="userCountry" placeholder="Bangladesh" />
+        <label>Budget max (optional)</label>
+        <input type="number" id="budgetMax" min="0" step="1" />
+        <label>Preferred brands (comma separated)</label>
+        <input type="text" id="preferredBrands" placeholder="Sony, Philips" />
+        <label>Avoid brands (comma separated)</label>
+        <input type="text" id="avoidBrands" placeholder="Unknown Brand" />
+        <label>Use case</label>
+        <input type="text" id="useCase" placeholder="Daily home use" />
+      </section>
+
+      <section>
+        <h2>Performance</h2>
+        <label>Cache minutes</label>
+        <input type="number" id="cacheMinutes" min="1" max="240" step="1" />
+        <label><input type="checkbox" id="enableFeedback" /> Enable feedback loop</label>
       </section>
 
       <footer>
